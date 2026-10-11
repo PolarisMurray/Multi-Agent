@@ -20,11 +20,9 @@ class ToolResult:
 
     @classmethod
     def fail(cls, error: str) -> ToolResult:
-        # 失败时只需要原因，不要求调用方再传 content。
         return cls(success=False, error=error)
 
     def for_model(self) -> str:
-        # 返回值会作为 tool 消息发给模型，必须是字符串。
         if self.success:
             return self.content
         return f"Tool execution failed: {self.error}"
@@ -49,7 +47,6 @@ class ToolManager:
         return sorted(self._tools)
 
     def values(self) -> list[Any]:
-        # 与 names() 同序：发给模型的工具列表每次都一样，便于复现和调试。
         return [self._tools[name] for name in self.names()]
 
     async def invoke(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
@@ -59,9 +56,9 @@ class ToolManager:
         try:
             result = await tool.invoke(arguments)
         except Exception as error:
-            # 任何工具异常都变成 observation，Agent 不会因此崩溃。
+            
             return ToolResult.fail(str(error))
-        # 统一出口：不管工具返回什么，调用方拿到的永远是 ToolResult。
+        
         return result if isinstance(result, ToolResult) else ToolResult.ok(str(result))
 
 
@@ -97,7 +94,7 @@ class CalculatorTool:
             return self._evaluate(node.body)
 
         if isinstance(node, ast.Constant):
-            # 用 type() 而不是 isinstance()：bool 是 int 的子类，True 必须被拒绝。
+
             if type(node.value) not in (int, float):
                 raise ValueError("Only numbers are allowed")
             return node.value
@@ -108,11 +105,11 @@ class CalculatorTool:
                 raise ValueError("Unsupported operator")
             left = self._evaluate(node.left)
             right = self._evaluate(node.right)
-            # 防 DoS：2 ** 100000000 会把 CPU 和内存打满。
+            
             if isinstance(node.op, ast.Pow) and (abs(right) > 100 or abs(left) > 1_000_000):
                 raise ValueError("Exponentiation is too large")
             result = operation(left, right)
-            # (-8) ** 0.5 会得到复数，这里拒绝。
+            
             if type(result) not in (int, float):
                 raise ValueError("Result must be a real number")
             return result
@@ -135,7 +132,7 @@ class CalculatorTool:
             result = self._evaluate(ast.parse(expression, mode="eval"))
         except (SyntaxError, ValueError, ZeroDivisionError, OverflowError) as error:
             return ToolResult.fail(str(error))
-        # 带上原表达式，模型能看出算的是哪一个。
+    
         return ToolResult.ok(f"{expression} = {result}")
 
 
