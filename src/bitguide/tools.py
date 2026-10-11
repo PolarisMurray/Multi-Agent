@@ -56,9 +56,8 @@ class ToolManager:
         try:
             result = await tool.invoke(arguments)
         except Exception as error:
-            
             return ToolResult.fail(str(error))
-        
+
         return result if isinstance(result, ToolResult) else ToolResult.ok(str(result))
 
 
@@ -94,7 +93,6 @@ class CalculatorTool:
             return self._evaluate(node.body)
 
         if isinstance(node, ast.Constant):
-
             if type(node.value) not in (int, float):
                 raise ValueError("Only numbers are allowed")
             return node.value
@@ -105,11 +103,11 @@ class CalculatorTool:
                 raise ValueError("Unsupported operator")
             left = self._evaluate(node.left)
             right = self._evaluate(node.right)
-            
+
             if isinstance(node.op, ast.Pow) and (abs(right) > 100 or abs(left) > 1_000_000):
                 raise ValueError("Exponentiation is too large")
             result = operation(left, right)
-            
+
             if type(result) not in (int, float):
                 raise ValueError("Result must be a real number")
             return result
@@ -132,7 +130,7 @@ class CalculatorTool:
             result = self._evaluate(ast.parse(expression, mode="eval"))
         except (SyntaxError, ValueError, ZeroDivisionError, OverflowError) as error:
             return ToolResult.fail(str(error))
-    
+
         return ToolResult.ok(f"{expression} = {result}")
 
 
