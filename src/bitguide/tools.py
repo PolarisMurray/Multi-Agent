@@ -93,7 +93,8 @@ class CalculatorTool:
             return self._evaluate(node.body)
 
         if isinstance(node, ast.Constant):
-            if type(node.value) not in (int, float):
+            # bool 是 int 的子类，必须先单独排除；isinstance 能让 pyright 把类型收窄成 int | float。
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
                 raise ValueError("Only numbers are allowed")
             return node.value
 
