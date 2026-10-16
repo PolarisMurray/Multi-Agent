@@ -3,34 +3,107 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .contracts import LLmClient, Retriever, Tool
-from .memory import ConversationMemory, MemoryStore
+from .contracts import LLMClient, Retriever, Tool
+from .memory import ConversationMemory, Interaction, MemoryStore
 from .models import AgentRequest, AgentResponse, Message
 from .tools import ToolManager
 
+
 class Agent:
-    def __init__ (
+    """ReAct loop: ask the model, run the tools it requests, repeat until it answers."""
+
+    def __init__(
         self,
-        agent_id : str,
-        SystemPrompt: str,
-        llm : LLmClient,
-        tools : Iterable[Tool] = (),
+        agent_id: str,
+        system_prompt: str,
+        llm: LLMClient,
+        tools: Iterable[Tool] = (),
         retriever: Retriever | None = None,
         max_iterations: int = 8,
         memory: MemoryStore | None = None,
     ):
-
-
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be positive")
+        self.agent_id = agent_id
+        self.system_prompt = system_prompt
+        self.max_iterations = max_iterations
+        self._llm = llm
+        self._retriever = retriever
+        self._memory = memory if memory is not None else ConversationMemory()
+        self._tools = ToolManager()
+        for tool in tools:
+            self._tools.register(tool)
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            }
+            for tool in self._tools.values()
+        ]
 
+    async def _system_message(self, query: str) -> Message:
+        if self._retriever is None:
+            return Message("system", self.system_prompt)
+        documents = await self._retriever.retrieve(query)
+        if not documents:
+            return Message("system", self.system_prompt)
+        context = "\n".join(f"- {doc}" for doc in documents)
+        return Message("system", f"{self.system_prompt}\n\n参考资料：\n{context}")
 
     async def run(self, request: AgentRequest) -> AgentResponse:
+        session_id = request.session_id
+        user = Interaction("user", request.message)
+        # 只把 user / assistant 历史发给模型；工具记录留在记忆里做审计
+        history = [m for m in await self._memory.messages(session_id) if m.role != "tool"]
+        messages = [
+            await self._system_message(request.message),
+            *history,
+            Message("user", request.message),
+        ]
+        schemas = self._tool_schemas()
+        tool_records: list[Interaction] = []
 
+        for iteration in range(1, self.max_iterations + 1):
+            turn = await self._llm.complete(messages, schemas)
 
+            if turn.tool_calls:
+                messages.append(Message("assistant", turn.content, tool_calls=turn.tool_calls))
+                for call in turn.tool_calls:
+                    result = await self._tools.invoke(call.name, call.arguments)
+                    content = result.for_model()
+                    messages.append(Message("tool", content, name=call.name, tool_call_id=call.id))
+                    tool_records.append(
+                        Interaction("tool", content, name=call.name, tool_call_id=call.id)
+                    )
+                continue
 
-    def tool_name(self) -> list[str]:
+            answer = turn.content.strip()
+            if not answer:
+                raise RuntimeError("Model returned an empty answer")
+
+            # 成功后才按时间顺序一次性写入记忆，失败的请求不留下半截对话
+            await self._memory.add(session_id, user)
+            for record in tool_records:
+                await self._memory.add(session_id, record)
+            await self._memory.add(session_id, Interaction("assistant", answer))
+
+            return AgentResponse(
+                content=answer,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                iterations=iteration,
+            )
+
+        raise RuntimeError(f"Agent did not finish within {self.max_iterations} iterations")
+
+    def tool_names(self) -> list[str]:
         return self._tools.names()
 
-    async def clear_seesion(self, session_id: str) -> None:
+    async def clear_session(self, session_id: str) -> None:
         await self._memory.clear(session_id)

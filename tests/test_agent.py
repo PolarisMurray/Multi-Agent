@@ -1,17 +1,18 @@
 import pytest
 
 from bitguide.agent import Agent
-from bitguide.agent import ConversationMemory
-from bitguide.agent import AgentRequest, ModelTurn, ToolCall
-from bitguide.agent import CalculatorTool
+from bitguide.memory import ConversationMemory
+from bitguide.models import AgentRequest, Message, ModelTurn, ToolCall
+from bitguide.tools import CalculatorTool
+
 
 class ScriptedLLM:
-    """return each ModelTurn by steps, and record, save the tools and messages that each call used"""
+    """Return the scripted ModelTurns in order, recording the messages and tools of each call."""
 
-    def __init__ (self, *turn: ModelTurn):
+    def __init__(self, *turns: ModelTurn):
         self._turns = list(turns)
-        self.call : list[list] = []
-        self.tools_seen : list[list] = []
+        self.calls: list[list[Message]] = []
+        self.tools_seen: list[list] = []
 
     async def complete(self, messages, tools):
         self.calls.append(list(messages))
@@ -19,17 +20,18 @@ class ScriptedLLM:
         return self._turns.pop(0)
 
 
-
 class FixedRetriever:
-    async def retrieve(self, query, top_k = 5):
-        return ["5 year old kid should not plauy cod"]
+    async def retrieve(self, query, top_k=5):
+        return ["3 岁左右的孩子适合拼图和积木"]
 
 
-def calc(call_id :str, expr : str) -> ToolCall:
+def calc(call_id: str, expr: str) -> ToolCall:
     return ToolCall(call_id, "calculator", {"expression": expr})
 
+
 def req(text: str, session: str = "s1") -> AgentRequest:
-    return AgentRequest(message = text, sesion_id = session)
+    return AgentRequest(message=text, session_id=session)
+
 
 async def test_direct_answer_without_tools():
     llm = ScriptedLLM(ModelTurn(content="你好！"))
@@ -38,7 +40,12 @@ async def test_direct_answer_without_tools():
 
     resp = await agent.run(req("hi"))
 
-    assert (resp.content, resp.agent_id, resp.session_id, resp.iterations) == ("你好！", "a1", "s1", 1)
+    assert (resp.content, resp.agent_id, resp.session_id, resp.iterations) == (
+        "你好！",
+        "a1",
+        "s1",
+        1,
+    )
     assert [(m.role, m.content) for m in llm.calls[0]] == [("system", "你是助手"), ("user", "hi")]
     assert [(i.type, i.content) for i in await memory.history("s1")] == [
         ("user", "hi"),
@@ -114,8 +121,14 @@ async def test_history_is_sent_but_tool_messages_are_filtered():
         ("assistant", "21"),
         ("user", "谢谢"),
     ]
-    # 工具记录仍然保存在记忆里，用于审计
-    assert any(i.type == "tool" for i in await memory.history("s1"))
+    # 工具记录仍然按时间顺序保存在记忆里，用于审计
+    assert [i.type for i in await memory.history("s1")] == [
+        "user",
+        "tool",
+        "assistant",
+        "user",
+        "assistant",
+    ]
 
 
 async def test_retriever_context_is_added_to_system_prompt():
@@ -137,7 +150,7 @@ async def test_exceeding_max_iterations_raises_and_saves_nothing():
         await agent.run(req("loop"))
 
     assert len(llm.calls) == 3
-    assert all(i.type == "tool" for i in await memory.history("s1"))  # 没写入 user / assistant
+    assert await memory.history("s1") == []  # 失败的请求不写入任何记录
 
 
 async def test_empty_answer_raises():
