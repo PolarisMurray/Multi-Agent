@@ -5,10 +5,6 @@ A configuration-driven multi-agent platform written from scratch in Python 3.11 
 MCP (JSON-RPC over stdio), a reference-counted agent registry, and a graph workflow engine with
 parallel super-steps, checkpoints, and human-in-the-loop pause / resume.
 
-配置驱动的多 Agent 平台：手写 ReAct 推理循环、工具调用、RAG 检索、MCP 协议接入、
-带引用计数的 Agent 注册表，以及支持并行超步、断点恢复、人工审批的图式工作流引擎。
-不依赖 LangChain / LangGraph，**没有大模型也能用 `--offline` 跑通全部流程**。
-
 ```mermaid
 flowchart LR
     CLI[CLI] --> P[Platform]
