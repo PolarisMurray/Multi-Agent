@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from .models import Message, ModelTurn
 from .tools import ToolResult
@@ -26,3 +26,8 @@ class Tool(Protocol):
 
 class Retriever(Protocol):
     async def retrieve(self, query: str, top_k: int = 5) -> list[str]: ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    async def close(self) -> None: ...

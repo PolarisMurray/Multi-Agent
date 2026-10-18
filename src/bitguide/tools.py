@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import operator
+import statistics
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -164,3 +165,42 @@ class DateTimeTool:
         if fmt not in self._formats:
             return ToolResult.fail(f"Unsupported format: {fmt}")
         return ToolResult.ok(now.strftime(self._formats[fmt]))
+
+
+class DataAnalyzerTool:
+    name = "data_analyzer"
+    description = "Compute count, sum, mean, median, min and max of a list of numbers."
+    parameters = {
+        "type": "object",
+        "properties": {"values": {"type": "array", "items": {"type": "number"}}},
+        "required": ["values"],
+        "additionalProperties": False,
+    }
+
+    async def invoke(self, arguments: Mapping[str, Any]) -> ToolResult:
+        raw = arguments.get("values")
+        if not isinstance(raw, list) or not raw:
+            return ToolResult.fail("values must be a non-empty list of numbers")
+        try:
+            values = [float(value) for value in raw]
+        except (TypeError, ValueError):
+            return ToolResult.fail("values must contain only numbers")
+        return ToolResult.ok(
+            f"count={len(values)}, sum={sum(values):g}, mean={statistics.mean(values):g}, "
+            f"median={statistics.median(values):g}, min={min(values):g}, max={max(values):g}"
+        )
+
+
+# 配置里写的是工具名字（toolRefs），Factory 通过这张表把名字变成对象
+BUILTIN_TOOLS: dict[str, Callable[[], Any]] = {
+    "calculator": CalculatorTool,
+    "datetime": DateTimeTool,
+    "data_analyzer": DataAnalyzerTool,
+}
+
+
+def create_builtin_tools(names: list[str]) -> list[Any]:
+    unknown = [name for name in names if name not in BUILTIN_TOOLS]
+    if unknown:
+        raise ValueError(f"Unknown builtin tools: {', '.join(unknown)}")
+    return [BUILTIN_TOOLS[name]() for name in names]

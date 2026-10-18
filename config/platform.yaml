@@ -1,0 +1,99 @@
+# BitGuide 多 Agent 平台配置
+# - 相对路径都相对 baseDir（默认 ".."：本文件的上一级目录，也就是项目根）
+# - 没装模型？命令行加 --offline，会把模型换成离线规则模型、向量换成本地哈希向量
+
+models:
+  local:
+    provider: ollama            # ollama | openai | offline
+    baseUrl: http://localhost:11434/v1
+    modelName: qwen2.5          # 先执行 ollama pull qwen2.5
+    temperature: 0.7
+    maxTokens: 2000
+    timeoutSeconds: 120
+  # 切换到云端模型：取消注释，再把下面 Agent 的 modelRef 改成 cloud
+  # cloud:
+  #   provider: openai
+  #   baseUrl: https://api.deepseek.com/v1
+  #   apiKeyEnv: DEEPSEEK_API_KEY   # 密钥放环境变量，不写进文件
+  #   modelName: deepseek-chat
+
+knowledgeBases:
+  parenting: knowledge/parenting
+  tech: knowledge/tech
+
+mcpServers:
+  parenting:
+    command: python             # python 会被替换成当前虚拟环境的解释器
+    args: [mcp_servers/parenting_server.py]
+    timeoutSeconds: 10
+
+rag:
+  enabled: true
+  failOpen: true                # 检索出错时降级为“无资料”，不影响回答
+  embedding:
+    provider: hash              # hash（离线）| ollama（ollama pull nomic-embed-text，dimension 改 768）
+    dimension: 256
+  vectorStore:
+    type: memory                # memory | milvus（uv sync --extra milvus）
+    uri: data/milvus.db         # milvus 时：本地文件 = Milvus Lite；或 http://localhost:19530
+    collectionPrefix: bitguide_
+  splitter:
+    maxSegmentSize: 300
+    overlap: 50
+  retrieval:
+    topK: 3
+    scoreThreshold: 0.1
+
+skills:
+  directory: skills
+
+agents:
+  parenting_advisor:
+    id: parenting_advisor
+    name: 亲子教育顾问
+    description: 从儿童发展和家庭教育角度给建议
+    modelRef: local
+    systemPrompt: 你是一位专业、温暖的亲子教育顾问。请给出科学、安全、可操作的建议，不确定时要说明。
+    tools: [calculator, datetime]
+    mcpServers: [parenting]
+    skills: [parenting-activity-advice]
+    knowledgeBase: parenting
+    maxIterations: 6
+
+  tech_helper:
+    id: tech_helper
+    name: 技术助手
+    description: 从软件工程角度给出可验证的方案
+    modelRef: local
+    systemPrompt: 你是一位严谨的软件技术助手。回答要分步骤、可验证，并指出边界条件。
+    tools: [calculator, data_analyzer]
+    skills: [code-review]
+    knowledgeBase: tech
+    maxIterations: 6
+
+  content_editor:
+    id: content_editor
+    name: 内容编辑
+    description: 审阅、润色并合并多方内容
+    modelRef: local
+    systemPrompt: 你是一位内容编辑。保留事实和原意，改善结构和表达，标出不确定的地方。
+    tools: [datetime]
+    maxIterations: 4
+
+etcd:
+  enabled: false                # true 或命令行 --etcd：启动时用 etcd 里的 Agent 定义覆盖本文件
+  endpoint: http://localhost:2379
+  prefix: /bitguide/agents/
+
+workflow:
+  maxSteps: 50                  # 防止循环图死循环
+  parallelism: 4                # 同一步最多并行执行的节点数
+  checkpoint:
+    backend: file               # file（默认，可跨进程恢复）| redis（uv sync --extra redis）| memory
+    directory: .bitguide/checkpoints
+    redisUrl: redis://localhost:6379/0
+
+observability:
+  trace: true                   # 打印 推理 → 工具 → 观察 → 回答 的过程；--quiet 关闭
+  format: console               # console | json（结构化日志）
+  maxContentLength: 300
