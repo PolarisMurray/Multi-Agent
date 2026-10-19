@@ -5,6 +5,7 @@
     bitguide workflow list                           列出 8 个演示工作流
     bitguide workflow run expert_review -i "..."     运行工作流
     bitguide workflow resume <thread> --approve      人工审批后继续（换个进程也行）
+    bitguide worker                                  从 Redis 队列取 Gin 网关提交的任务来执行
     bitguide etcd seed                               把 YAML 里的 Agent 定义写进 etcd
 加 --offline 可以在没有大模型的机器上跑通全部流程。
 """
@@ -22,6 +23,7 @@ import openai
 from .application import DEFAULT_CONFIG, Platform, load_agents_from_etcd, seed_agents_to_etcd
 from .config import PlatformSettings
 from .infrastructure import EtcdClient
+from .worker import serve
 from .workflow_runtime import RunResult
 
 MODEL_HINT = "提示：先 `ollama serve`，再 `ollama pull qwen2.5`；或者加 --offline 用离线模型"
@@ -58,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--comment", default="", help="审批意见")
     workflow.add_parser("show", help="查看某次运行的 Checkpoint").add_argument("thread")
     workflow.add_parser("history", help="最近的运行记录")
+
+    worker = commands.add_parser("worker", help="执行 Gin 网关提交的工作流任务")
+    worker.add_argument("--redis", default="redis://localhost:6379/0", help="任务队列所在的 Redis")
+    worker.add_argument("--concurrency", type=int, default=4, help="最多同时执行几个任务")
 
     etcd = commands.add_parser("etcd", help="etcd 配置中心").add_subparsers(
         dest="action", required=True
@@ -180,6 +186,8 @@ async def _dispatch(args: argparse.Namespace) -> None:
             await _agents(platform)
         elif args.command == "chat":
             await _chat(platform, args)
+        elif args.command == "worker":
+            await serve(platform.workflows, args.redis, args.concurrency)
         else:
             await _workflow(platform, args)
 
