@@ -3,19 +3,48 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 )
 
-const taskPrefix = "bitguide:task:"
+const (
+	taskPrefix = "bitguide:task:"
+	taskTopic  = "bitguide.tasks"
+)
 
+type Job struct {
+	ID       string
+	Action   string
+	Workflow string
+	Input    string
+	Value    map[string]any
+}
 type server struct {
 	rdb *redis.Client
+	kw  *kafaka.Writer
 }
 
+func (s *server) enqueue(c *gin.Context, job Job, fields ...any) error {
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+
+	fields = append(fields, "status", "queued", "updated_at", time.Now().UTC().Format((time.RFC3339)))
+	if err := s.rdb.HSet(c, taskPrefix+job.ID, fields...).Err(); err != nil {
+		return err
+	}
+	err = s.kw.WriteMessages(c, kafka.Message{Key: []byte(job.ID), Value: payload})
+	if err != nil {
+		s.rdb.HSet(c, taskPrefix+job.ID, "status", "failed", "error", err.Error())
+	}
+	return err
+}
 func (s *server) submit(c *gin.Context) {
 	var req struct {
 		Workflow string `json:"workflow" binding:"required"`
