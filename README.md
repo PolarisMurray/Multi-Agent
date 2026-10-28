@@ -8,6 +8,7 @@ parallel super-steps, checkpoints, and human-in-the-loop pause / resume.
 ```mermaid
 flowchart LR
     CLI[CLI] --> P[Platform]
+    API[Gin gateway<br/>Go] -- LPUSH --> Q[(Redis<br/>queue + status)] -- BRPOP --> WK[worker] --> P
     YAML[(platform.yaml)] --> F
     ETCD[(etcd)] -.-> F
     P --> F[AgentFactory] --> R[AgentRegistry<br/>ref-count + safe replace]
@@ -35,6 +36,28 @@ uv run bitguide --offline workflow resume demo --approve # resumes from checkpoi
 With a real model: `ollama pull qwen2.5`, then drop `--offline`. To use a cloud model, add an
 OpenAI-compatible entry under `models:` in `config/platform.yaml` (API key via `apiKeyEnv`).
 
+## HTTP API (Gin gateway)
+
+The Go gateway in `gateway/` only accepts tasks, queues them, and reports status; the Python
+`bitguide worker` executes them. The two sides talk only through Redis: a List is the queue and
+a Hash per task holds `queued → running → completed / interrupted / failed`. HTTP requests return
+`202` immediately instead of waiting for a workflow that may run for a minute or stop for
+approval. The task id doubles as the workflow thread id, so `resume` reaches the same checkpoint.
+
+```bash
+redis-server                                      # localhost:6379
+uv run bitguide --offline worker                  # --concurrency 4; start more processes to scale
+cd gateway && go run .                            # :8080 (env ADDR, REDIS_ADDR)
+
+curl -X POST localhost:8080/tasks -d '{"workflow":"human_approval","input":"周五团建"}'
+# → 202 {"id":"e2a6f8d6910d","status":"queued"}
+curl localhost:8080/tasks/e2a6f8d6910d            # status, output, interrupt (JSON string), error
+curl -X POST localhost:8080/tasks/e2a6f8d6910d/resume -d '{"approved":true,"comment":"ok"}'
+```
+
+`resume` returns `409` unless the task is `interrupted` (body required) or `failed` (retry, body
+optional). Unknown workflow names are accepted and show up as `failed` once the worker picks them up.
+
 ## Highlights
 
 | Area | What it does |
@@ -53,15 +76,17 @@ OpenAI-compatible entry under `models:` in `config/platform.yaml` (API key via `
 
 ```
 config/platform.yaml     models, agents, RAG, MCP, workflow settings
+gateway/main.go          Gin HTTP API: submit / query / resume tasks via a Redis queue
 src/bitguide/
   models.py tools.py memory.py contracts.py agent.py   # single agent core
   llm.py config.py observability.py skills.py rag.py mcp.py
   infrastructure.py registry.py factory.py application.py cli.py
   workflow_core.py workflow_runtime.py workflow_checkpoint.py
   workflow_nodes.py workflow_registry.py workflow_demos.py workflow.py
+  worker.py                                            # consumes tasks queued by the gateway
 mcp_servers/             a minimal MCP server (no SDK)
 knowledge/  skills/      sample knowledge base and SKILL.md files
-tests/                   177 tests, 93% coverage, no network needed
+tests/                   180 tests, 93% coverage, no network needed
 ```
 
 ## Development
