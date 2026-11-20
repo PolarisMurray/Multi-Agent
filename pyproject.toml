@@ -20,6 +20,9 @@ redis = [
 milvus = [
     "pymilvus[milvus-lite]>=3.0.2",
 ]
+kafka = [
+    "aiokafka>=0.15.0",
+]
 
 [build-system]
 requires = ["hatchling"]

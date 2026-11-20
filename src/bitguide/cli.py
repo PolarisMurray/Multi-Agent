@@ -5,7 +5,7 @@
     bitguide workflow list                           列出 8 个演示工作流
     bitguide workflow run expert_review -i "..."     运行工作流
     bitguide workflow resume <thread> --approve      人工审批后继续（换个进程也行）
-    bitguide worker                                  从 Redis 队列取 Gin 网关提交的任务来执行
+    bitguide worker                                  从 Kafka 取 Gin 网关提交的任务来执行
     bitguide etcd seed                               把 YAML 里的 Agent 定义写进 etcd
 加 --offline 可以在没有大模型的机器上跑通全部流程。
 """
@@ -62,8 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow.add_parser("history", help="最近的运行记录")
 
     worker = commands.add_parser("worker", help="执行 Gin 网关提交的工作流任务")
-    worker.add_argument("--redis", default="redis://localhost:6379/0", help="任务队列所在的 Redis")
-    worker.add_argument("--concurrency", type=int, default=4, help="最多同时执行几个任务")
+    worker.add_argument("--kafka", default="localhost:9092", help="Kafka broker 地址")
+    worker.add_argument("--concurrency", type=int, default=3, help="消费者个数，不超过分区数")
 
     etcd = commands.add_parser("etcd", help="etcd 配置中心").add_subparsers(
         dest="action", required=True
@@ -187,7 +187,7 @@ async def _dispatch(args: argparse.Namespace) -> None:
         elif args.command == "chat":
             await _chat(platform, args)
         elif args.command == "worker":
-            await serve(platform.workflows, args.redis, args.concurrency)
+            await serve(platform, args.kafka, args.concurrency)
         else:
             await _workflow(platform, args)
 

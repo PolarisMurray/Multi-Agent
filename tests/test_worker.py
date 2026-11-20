@@ -1,13 +1,13 @@
-"""worker：模拟 Gin 网关往 Redis 里写任务，检查 worker 执行后写回的状态。"""
+"""worker：不连 Kafka，publish 换成往列表里追加，检查发出的事件和幂等跳过。"""
 
-import asyncio
 import json
 
-import fakeredis
 import pytest
 
 from bitguide.application import Platform
-from bitguide.worker import QUEUE_KEY, TASK_PREFIX, consume, handle
+from bitguide.observability import NullTracer
+from bitguide.worker import EventTracer, handle
+from bitguide.workflow import WorkflowService
 
 
 @pytest.fixture
@@ -18,41 +18,50 @@ async def platform(offline_settings):
 
 
 @pytest.fixture
-def redis():
-    return fakeredis.FakeAsyncRedis(decode_responses=True)
+def events():
+    return []
 
 
-async def test_run_then_resume_after_approval(platform, redis):
-    job = {"id": "t1", "action": "run", "workflow": "human_approval", "input": "周五团建"}
-    await handle(platform.workflows, redis, job)
-    task = await redis.hgetall(TASK_PREFIX + "t1")
-    assert task["status"] == "interrupted"
-    assert json.loads(task["interrupt"])["node"] and task["output"] == ""
-
-    job = {"id": "t1", "action": "resume", "value": {"approved": True, "comment": ""}}
-    await handle(platform.workflows, redis, job)
-    task = await redis.hgetall(TASK_PREFIX + "t1")
-    assert task["status"] == "completed" and "已发布" in task["output"]
-    assert task["interrupt"] == ""  # 旧的中断信息被清掉
+@pytest.fixture
+def service(platform, events):
+    tracer = EventTracer(events.append, NullTracer())
+    return WorkflowService(platform.workflows.registry, platform.workflows.store, tracer=tracer)
 
 
-async def test_unknown_workflow_marks_task_failed(platform, redis):
-    job = {"id": "t2", "action": "run", "workflow": "nope", "input": "x"}
-    await handle(platform.workflows, redis, job)
-    task = await redis.hgetall(TASK_PREFIX + "t2")
-    assert task["status"] == "failed" and "nope" in task["error"]
+def statuses(events):
+    return [e["status"] for e in events if e["type"] == "status"]
 
 
-async def test_consumer_takes_jobs_from_queue(platform, redis):
-    job = {"id": "t3", "action": "run", "workflow": "pipeline", "input": "孩子想学编程"}
-    await redis.lpush(QUEUE_KEY, json.dumps(job))
-    consumer = asyncio.create_task(consume(platform.workflows, redis))
-    try:
-        for _ in range(100):
-            if await redis.hget(TASK_PREFIX + "t3", "status") == "completed":
-                break
-            await asyncio.sleep(0.02)
-        assert await redis.hget(TASK_PREFIX + "t3", "status") == "completed"
-        assert await redis.llen(QUEUE_KEY) == 0
-    finally:
-        consumer.cancel()
+async def test_run_then_resume_after_approval(service, events):
+    await handle(
+        service,
+        {"id": "t1", "action": "run", "workflow": "human_approval", "input": "周五团建"},
+        events.append,
+    )
+    assert statuses(events) == ["running", "interrupted"]
+    assert json.loads(events[-1]["interrupt"])["node"]
+    assert any(e["type"] == "progress" and e["id"] == "t1" for e in events)
+
+    events.clear()
+    value = {"approved": True, "comment": ""}
+    await handle(service, {"id": "t1", "action": "resume", "value": value}, events.append)
+    assert statuses(events) == ["running", "completed"]
+    assert "已发布" in events[-1]["output"] and events[-1]["interrupt"] is None
+
+
+async def test_redelivered_messages_are_skipped(service, events):
+    job = {"id": "t2", "action": "run", "workflow": "pipeline", "input": "孩子想学编程"}
+    await handle(service, job, events.append)
+    assert statuses(events) == ["running", "completed"]
+
+    events.clear()
+    await handle(service, job, events.append)  # 同一条消息又来了一次
+    await handle(service, {"id": "t2", "action": "resume"}, events.append)  # 已完成的不能再 resume
+    assert events == []
+
+
+async def test_unknown_workflow_reports_failed(service, events):
+    await handle(
+        service, {"id": "t3", "action": "run", "workflow": "nope", "input": "x"}, events.append
+    )
+    assert statuses(events) == ["running", "failed"] and "nope" in events[-1]["error"]

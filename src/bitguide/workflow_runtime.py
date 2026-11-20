@@ -99,7 +99,13 @@ class WorkflowRunner:
                 return await self._finish(
                     cp, "failed", error=f"exceeded max_steps={self.max_steps}"
                 )
-            self.tracer.emit("workflow.step", self.graph.name, step=cp.step + 1, nodes=cp.frontier)
+            self.tracer.emit(
+                "workflow.step",
+                self.graph.name,
+                thread_id=cp.thread_id,
+                step=cp.step + 1,
+                nodes=cp.frontier,
+            )
 
             # ---- 1. 执行：中断 / 失败恢复时，已经完成的节点不再重跑
             todo = [name for name in cp.frontier if name not in cp.pending_writes]
@@ -120,7 +126,11 @@ class WorkflowRunner:
                 else:
                     cp.pending_writes[name] = outcome
                     self.tracer.emit(
-                        "workflow.node_done", self.graph.name, node=name, keys=list(outcome)
+                        "workflow.node_done",
+                        self.graph.name,
+                        thread_id=cp.thread_id,
+                        node=name,
+                        keys=list(outcome),
                     )
             if failed:
                 return await self._finish(cp, "failed", error="; ".join(failed))
