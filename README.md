@@ -8,7 +8,9 @@ parallel super-steps, checkpoints, and human-in-the-loop pause / resume.
 ```mermaid
 flowchart LR
     CLI[CLI] --> P[Platform]
-    API[Gin gateway<br/>Go] -- LPUSH --> Q[(Redis<br/>queue + status)] -- BRPOP --> WK[worker] --> P
+    UI[React web UI] -- HTTP / SSE --> API[Gin gateway<br/>Go]
+    API -- bitguide.tasks --> K[(Kafka)] -- consumer group --> WK[worker] --> P
+    WK -- bitguide.events --> K -- status / progress --> API
     YAML[(platform.yaml)] --> F
     ETCD[(etcd)] -.-> F
     P --> F[AgentFactory] --> R[AgentRegistry<br/>ref-count + safe replace]
@@ -36,27 +38,47 @@ uv run bitguide --offline workflow resume demo --approve # resumes from checkpoi
 With a real model: `ollama pull qwen2.5`, then drop `--offline`. To use a cloud model, add an
 OpenAI-compatible entry under `models:` in `config/platform.yaml` (API key via `apiKeyEnv`).
 
-## HTTP API (Gin gateway)
+## Web UI, gateway and workers
 
-The Go gateway in `gateway/` only accepts tasks, queues them, and reports status; the Python
-`bitguide worker` executes them. The two sides talk only through Redis: a List is the queue and
-a Hash per task holds `queued → running → completed / interrupted / failed`. HTTP requests return
-`202` immediately instead of waiting for a workflow that may run for a minute or stop for
-approval. The task id doubles as the workflow thread id, so `resume` reaches the same checkpoint.
-
-```bash
-redis-server                                      # localhost:6379
-uv run bitguide --offline worker                  # --concurrency 4; start more processes to scale
-cd gateway && go run .                            # :8080 (env ADDR, REDIS_ADDR)
-
-curl -X POST localhost:8080/tasks -d '{"workflow":"human_approval","input":"周五团建"}'
-# → 202 {"id":"e2a6f8d6910d","status":"queued"}
-curl localhost:8080/tasks/e2a6f8d6910d            # status, output, interrupt (JSON string), error
-curl -X POST localhost:8080/tasks/e2a6f8d6910d/resume -d '{"approved":true,"comment":"ok"}'
+```
+browser ──HTTP──► Gin gateway ──bitguide.tasks──► Python workers (consumer group)
+browser ◄──SSE─── Gin gateway ◄─bitguide.events── Python workers
+                      │
+                    Redis (task state, written only by the gateway)
 ```
 
-`resume` returns `409` unless the task is `interrupted` (body required) or `failed` (retry, body
-optional). Unknown workflow names are accepted and show up as `failed` once the worker picks them up.
+- **Two Kafka topics, keyed by task id**, so all messages of one task land on one partition and
+  stay in order (its `run` is always handled before its `resume`).
+- **Workers** (`bitguide worker`) join the `bitguide-workers` consumer group; partitions are spread
+  over consumers, so starting more processes scales out.
+- **At-least-once + idempotent:** a worker commits the offset only after the workflow finished and
+  its events were sent, so a crash means redelivery. Before running, it checks the workflow
+  checkpoint and skips messages that were already handled.
+- **Events back to Go:** `status` events (running / interrupted / completed / failed) update Redis;
+  `progress` events (each workflow step and node) are forwarded to the browser over SSE.
+
+```bash
+redis-server                                     # localhost:6379
+brew install kafka && brew services start kafka  # localhost:9092
+kafka-topics --bootstrap-server localhost:9092 --create --topic bitguide.tasks --partitions 3
+kafka-topics --bootstrap-server localhost:9092 --create --topic bitguide.events --partitions 3
+
+uv sync --extra kafka
+uv run bitguide --offline worker                 # --concurrency 3 consumers (≤ partitions)
+cd gateway && go run .                           # :8080 (env ADDR, REDIS_ADDR, KAFKA_BROKERS)
+cd web && npm install && npm run dev             # http://localhost:5173
+```
+
+The web UI has three pages: submit a task, task list, and task detail. The detail page opens an
+`EventSource` on `GET /tasks/:id/events` (a `snapshot` first, then live events) and shows approve
+/ reject buttons while the workflow waits for approval.
+
+| Endpoint | |
+|---|---|
+| `POST /tasks` `{"workflow","input"}` | `202 {"id"}` |
+| `GET /tasks` · `GET /tasks/:id` | latest 50 tasks · one task |
+| `POST /tasks/:id/resume` `{"approved","comment"}` | only for `interrupted` (decision required) or `failed` (retry), else `409` |
+| `GET /tasks/:id/events` | SSE stream |
 
 ## Highlights
 
@@ -76,14 +98,16 @@ optional). Unknown workflow names are accepted and show up as `failed` once the 
 
 ```
 config/platform.yaml     models, agents, RAG, MCP, workflow settings
-gateway/main.go          Gin HTTP API: submit / query / resume tasks via a Redis queue
+gateway/                 Gin gateway: task API (tasks.go), Kafka events + SSE (events.go),
+                         GORM models for task history (store/, not wired in yet)
+web/                     Vite + React + TypeScript UI: submit, list, live detail with approval
 src/bitguide/
   models.py tools.py memory.py contracts.py agent.py   # single agent core
   llm.py config.py observability.py skills.py rag.py mcp.py
   infrastructure.py registry.py factory.py application.py cli.py
   workflow_core.py workflow_runtime.py workflow_checkpoint.py
   workflow_nodes.py workflow_registry.py workflow_demos.py workflow.py
-  worker.py                                            # consumes tasks queued by the gateway
+  worker.py                                            # Kafka worker: run tasks, send events back
 mcp_servers/             a minimal MCP server (no SDK)
 knowledge/  skills/      sample knowledge base and SKILL.md files
 tests/                   180 tests, 93% coverage, no network needed
@@ -97,6 +121,7 @@ uv run ruff check .       # lint
 uv run pyright            # type check
 uv sync --extra milvus    # optional: Milvus Lite vector store
 uv sync --extra redis     # optional: Redis checkpoint store
+uv sync --extra kafka     # optional: Kafka task worker
 ```
 
 License: for learning purposes. Rebuilt independently with reference to an open-source teaching
