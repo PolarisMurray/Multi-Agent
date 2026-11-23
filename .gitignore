@@ -10,3 +10,5 @@ data/
 *.db
 .coverage
 gateway/gateway
+node_modules/
+web/dist/
